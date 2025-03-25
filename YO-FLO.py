@@ -6,8 +6,6 @@ import time
 import sys
 import cv2
 import torch
-import hid  # For PTZ camera HID
-import msvcrt  # For Windows-specific PTZ control with arrow keys
 from datetime import datetime
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM, BitsAndBytesConfig
@@ -16,6 +14,25 @@ from colorama import Fore, Style, init
 import tkinter as tk
 from tkinter import filedialog, simpledialog, Toplevel
 import numpy as np
+
+# Conditional imports for PTZ functionality
+PTZ_AVAILABLE = False
+try:
+    import hid  # For PTZ camera HID
+    PTZ_HID_AVAILABLE = True
+except ImportError:
+    PTZ_HID_AVAILABLE = False
+    print(f"{Fore.YELLOW}HID module not available. PTZ camera control will be disabled.{Style.RESET_ALL}")
+
+try:
+    import msvcrt  # For Windows-specific PTZ control with arrow keys
+    PTZ_MSVCRT_AVAILABLE = True
+except ImportError:
+    PTZ_MSVCRT_AVAILABLE = False
+    print(f"{Fore.YELLOW}msvcrt module not available. Manual PTZ control with arrow keys will be disabled.{Style.RESET_ALL}")
+
+# Set overall PTZ availability based on critical components
+PTZ_AVAILABLE = PTZ_HID_AVAILABLE
 
 # ---------------------------------------------------------------------------
 # The following classes and functions are adapted from the CLI version,
@@ -63,6 +80,12 @@ class PTZController:
         :param usage: The HID usage number.
         """
         self.device = None
+        
+        # Check if HID module is available
+        if not PTZ_HID_AVAILABLE:
+            print("PTZ control unavailable - HID module not loaded.")
+            return
+            
         try:
             ptz_path = None
             for d in hid.enumerate(vendor_id, product_id):
@@ -87,8 +110,8 @@ class PTZController:
         :param report_id: The report ID for the PTZ control.
         :param value: The value that represents the specific command (e.g., pan left/right, tilt up/down).
         """
-        if not self.device:
-            print("PTZ Device not initialized.")
+        if not PTZ_HID_AVAILABLE or not self.device:
+            print("PTZ Device not initialized or not available.")
             return
         command = [report_id & 0xFF, value] + [0x00] * 30
         try:
@@ -128,6 +151,9 @@ class PTZController:
         """
         Closes the HID device handle, if open, to release system resources.
         """
+        if not PTZ_HID_AVAILABLE:
+            return
+            
         if self.device:
             try:
                 self.device.close()
@@ -166,6 +192,12 @@ class PTZTracker:
         :param smoothing_factor: Weight for exponential smoothing of bounding box size.
         :param max_consecutive_errors: Maximum camera command errors before deactivation.
         """
+        # Check if camera is None or not properly initialized
+        if not camera or not PTZ_AVAILABLE:
+            self.active = False
+            print("PTZ Tracker initialized but inactive - PTZ functionality not available.")
+            return
+            
         if not (0 < smoothing_factor < 1):
             raise ValueError("smoothing_factor must be between 0 and 1.")
         if desired_ratio <= 0 or desired_ratio >= 1:
@@ -199,6 +231,11 @@ class PTZTracker:
         """
         Activate or deactivate PTZ tracking. When deactivated, tracking resets smoothing and error counters.
         """
+        if not PTZ_AVAILABLE:
+            print("Cannot activate PTZ tracking - PTZ functionality not available.")
+            self.active = False
+            return
+            
         self.active = active
         if not active:
             self.smoothed_width = None
@@ -213,7 +250,7 @@ class PTZTracker:
         :param frame_width: The width of the current frame in pixels.
         :param frame_height: The height of the current frame in pixels.
         """
-        if not self.active:
+        if not self.active or not PTZ_AVAILABLE:
             return
 
         x1, y1, x2, y2 = bbox
@@ -296,6 +333,10 @@ class PTZTracker:
         """
         Safely invokes a camera command, handling exceptions and counting errors.
         """
+        if not PTZ_AVAILABLE or not self.camera:
+            self.consecutive_errors += 1
+            return False
+            
         if not hasattr(self.camera, command):
             print(f"Camera does not support command '{command}'.")
             return False
@@ -564,6 +605,15 @@ def ptz_control_thread(ptz_camera):
     A simple thread function for interactive PTZ control using arrow keys and +/- zoom on Windows.
     Press 'q' to quit PTZ mode.
     """
+    # Check if required modules are available
+    if not PTZ_MSVCRT_AVAILABLE:
+        print("Cannot start PTZ control thread - msvcrt module not available.")
+        return
+    
+    if not PTZ_HID_AVAILABLE or not ptz_camera:
+        print("Cannot start PTZ control thread - PTZ camera not available.")
+        return
+        
     print("PTZ control started. Use arrow keys to pan/tilt, +/- to zoom, q to quit.")
     while True:
         ch = msvcrt.getch()
@@ -702,6 +752,10 @@ class YO_FLO:
     # PTZ Camera & Tracker
     # -----------------------------------------------------------------------
     def init_ptz_camera(self):
+        if not PTZ_AVAILABLE:
+            print(f"{Fore.YELLOW}PTZ camera functionality not available. PTZ features disabled.{Style.RESET_ALL}")
+            return
+            
         if not self.ptz_camera:
             self.ptz_camera = PTZController()
 
@@ -709,6 +763,10 @@ class YO_FLO:
         """
         Prompt user for the object class name to track, store in self.track_object_name.
         """
+        if not PTZ_AVAILABLE:
+            print(f"{Fore.YELLOW}PTZ camera functionality not available. Cannot set target class.{Style.RESET_ALL}")
+            return
+            
         try:
             target_class = simpledialog.askstring(
                 "PTZ Target Class", 
@@ -731,6 +789,10 @@ class YO_FLO:
         Initializes PTZTracker with the PTZ camera if not already.
         Activates autonomous PTZ tracking for whatever object class is in self.track_object_name.
         """
+        if not PTZ_AVAILABLE:
+            print(f"{Fore.YELLOW}PTZ camera functionality not available. Cannot start tracking.{Style.RESET_ALL}")
+            return
+            
         self.init_ptz_camera()
         if not self.ptz_tracker:
             self.ptz_tracker = PTZTracker(self.ptz_camera)
@@ -745,6 +807,10 @@ class YO_FLO:
             )
 
     def stop_autonomous_ptz_tracking(self):
+        if not PTZ_AVAILABLE:
+            print(f"{Fore.YELLOW}PTZ camera functionality not available.{Style.RESET_ALL}")
+            return
+            
         if self.ptz_tracker:
             self.ptz_tracker.activate(False)
             print(
@@ -755,7 +821,15 @@ class YO_FLO:
         """
         Opens a thread that listens for arrow keys / +/- to drive PTZ in real time.
         """
+        if not PTZ_AVAILABLE or not PTZ_MSVCRT_AVAILABLE:
+            print(f"{Fore.YELLOW}PTZ manual control not available. Missing required modules.{Style.RESET_ALL}")
+            return
+            
         self.init_ptz_camera()
+        if not self.ptz_camera:
+            print(f"{Fore.YELLOW}PTZ camera could not be initialized.{Style.RESET_ALL}")
+            return
+            
         thread = threading.Thread(target=ptz_control_thread, args=(self.ptz_camera,))
         thread.start()
 
@@ -1366,8 +1440,8 @@ class YO_FLO:
                         if self.recording_manager:
                             self.recording_manager.handle_recording_by_detection(self.detections, frame)
 
-                        # PTZ tracking
-                        if self.ptz_tracker and self.ptz_tracker.active:
+                        # PTZ tracking - only if PTZ is available
+                        if PTZ_AVAILABLE and self.ptz_tracker and self.ptz_tracker.active:
                             primary_bbox = self._pick_tracked_object(self.detections)
                             if primary_bbox is not None:
                                 h, w, _ = frame.shape
@@ -1570,28 +1644,39 @@ class YO_FLO:
                 command=self.toggle_screenshot_on_no,
             ).pack(fill="x")
 
-            ptz_frame = tk.LabelFrame(self.root, text="PTZ Control")
-            ptz_frame.pack(fill="x", padx=10, pady=5)
-            tk.Button(
-                ptz_frame,
-                text="Open Manual PTZ Control",
-                command=self.open_manual_ptz_control,
-            ).pack(fill="x")
-            tk.Button(
-                ptz_frame,
-                text="Set PTZ Target Class",
-                command=self.set_ptz_target_class,
-            ).pack(fill="x")
-            tk.Button(
-                ptz_frame,
-                text="Start Autonomous Tracking",
-                command=self.start_autonomous_ptz_tracking,
-            ).pack(fill="x")
-            tk.Button(
-                ptz_frame,
-                text="Stop Autonomous Tracking",
-                command=self.stop_autonomous_ptz_tracking,
-            ).pack(fill="x")
+            # Only show PTZ control frame if PTZ functionality is available
+            if PTZ_AVAILABLE:
+                ptz_frame = tk.LabelFrame(self.root, text="PTZ Control")
+                ptz_frame.pack(fill="x", padx=10, pady=5)
+                tk.Button(
+                    ptz_frame,
+                    text="Open Manual PTZ Control",
+                    command=self.open_manual_ptz_control,
+                ).pack(fill="x")
+                tk.Button(
+                    ptz_frame,
+                    text="Set PTZ Target Class",
+                    command=self.set_ptz_target_class,
+                ).pack(fill="x")
+                tk.Button(
+                    ptz_frame,
+                    text="Start Autonomous Tracking",
+                    command=self.start_autonomous_ptz_tracking,
+                ).pack(fill="x")
+                tk.Button(
+                    ptz_frame,
+                    text="Stop Autonomous Tracking",
+                    command=self.stop_autonomous_ptz_tracking,
+                ).pack(fill="x")
+            else:
+                # Show a disabled PTZ frame with a message
+                ptz_frame = tk.LabelFrame(self.root, text="PTZ Control (Unavailable)")
+                ptz_frame.pack(fill="x", padx=10, pady=5)
+                tk.Label(
+                    ptz_frame,
+                    text="PTZ functionality not available - missing required modules",
+                    fg="red"
+                ).pack(fill="x")
 
             recording_frame = tk.LabelFrame(self.root, text="Recording Control")
             recording_frame.pack(fill="x", padx=10, pady=5)
